@@ -14,8 +14,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "YOUR_DATABASE_URL_HERE").replace("postgres://", "postgresql://")
-DEX_API_URL = "https://api.dexscreener.io/latest/dex/tokens"  # Replace with the actual API URL
-DEX_API_KEY = os.getenv("DEX_API_KEY", "YOUR_API_KEY_HERE")
+DEX_API_BASE_URL = "https://api.dexscreener.io/latest/dex/tokens"
+DEX_API_KEY = os.getenv("DEX_API_KEY", "YOUR_API_KEY_HERE")  # Optional, if required
 
 # Connect to the database
 engine = create_engine(DATABASE_URL)
@@ -26,6 +26,7 @@ def initialize_database():
     create_table_query = """
     CREATE TABLE IF NOT EXISTS tokens (
         id SERIAL PRIMARY KEY,
+        chain VARCHAR(255),
         token_name VARCHAR(255),
         price FLOAT,
         liquidity FLOAT,
@@ -38,10 +39,11 @@ def initialize_database():
         logging.info("Database initialized.")
 
 # Fetch data from DEX API
-def fetch_data_from_dex():
-    """Fetch data from the DEX API."""
-    headers = {"Authorization": f"Bearer {DEX_API_KEY}"}
-    response = requests.get(DEX_API_URL, headers=headers)
+def fetch_data_from_dex(chain_id):
+    """Fetch data from the DEX API for a specific chain."""
+    url = f"{DEX_API_BASE_URL}/{chain_id}"  # Chain-specific endpoint
+    headers = {"Authorization": f"Bearer {DEX_API_KEY}"}  # Add API key if required
+    response = requests.get(url, headers=headers)
     response.raise_for_status()
     data = response.json()
     return data["tokens"]
@@ -57,17 +59,27 @@ def filter_data(raw_data):
     
     # Filter tokens with liquidity > 5000 and created within the last 3 days
     min_date = datetime.utcnow() - timedelta(days=3)
-    df["created_at"] = pd.to_datetime(df["created_at"])
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
     df = df[(df["liquidity"] > 5000) & (df["created_at"] >= min_date)]
     return df
 
-# API route: Fetch tokens
-@app.route('/tokens', methods=['GET'])
-def get_tokens():
-    """Fetch and return filtered tokens."""
+# Store filtered data into the database
+def store_data_in_db(df, chain):
+    """Store filtered tokens into the database."""
+    if not df.empty:
+        df["chain"] = chain  # Add chain information
+        with engine.connect() as conn:
+            df.to_sql("tokens", conn, if_exists="append", index=False)
+        logging.info(f"{len(df)} tokens stored in the database.")
+
+# API route: Fetch tokens by chain
+@app.route('/tokens/<chain_id>', methods=['GET'])
+def get_tokens_by_chain(chain_id):
+    """Fetch and return filtered tokens for a specific chain."""
     try:
-        raw_data = fetch_data_from_dex()
+        raw_data = fetch_data_from_dex(chain_id)
         filtered_data = filter_data(raw_data)
+        store_data_in_db(filtered_data, chain_id)
         return jsonify(filtered_data.to_dict(orient="records"))
     except Exception as e:
         logging.error(f"Error fetching tokens: {e}")
