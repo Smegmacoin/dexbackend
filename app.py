@@ -1,6 +1,7 @@
 import os
 import logging
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from sqlalchemy import create_engine, text
 import requests
 import pandas as pd
@@ -9,12 +10,15 @@ from datetime import datetime, timedelta
 # Flask app setup
 app = Flask(__name__)
 
+# Enable CORS for the app
+CORS(app)
+
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://YOUR_DATABASE_URL_HERE").replace("postgres://", "postgresql://")
-DEX_API_URL = "https://api.dexscreener.io/latest/dex/tokens/solana"  # Solana-specific endpoint
+DEX_API_URL = "https://api.dexscreener.com/latest/dex/tokens/solana"  # Solana-specific endpoint
 DEX_API_KEY = os.getenv("DEX_API_KEY", "YOUR_API_KEY_HERE")
 
 # Connect to the database
@@ -26,7 +30,7 @@ def initialize_database():
     create_table_query = """
     CREATE TABLE IF NOT EXISTS tokens (
         id SERIAL PRIMARY KEY,
-        token_name VARCHAR(255),
+        pair_address VARCHAR(255),
         price FLOAT,
         liquidity FLOAT,
         volume FLOAT,
@@ -43,6 +47,8 @@ def fetch_data_from_dex():
     response = requests.get(DEX_API_URL)
     response.raise_for_status()
     data = response.json()
+    if not data.get("pairs"):
+        raise ValueError("No data available for Solana tokens.")
     return data["pairs"]
 
 # Filter and process data
@@ -51,8 +57,8 @@ def filter_data(raw_data):
     df = pd.DataFrame(raw_data)
     # Extract relevant fields
     df["price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-    df["liquidity"] = pd.to_numeric(df["liquidity"]["usd"], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"]["h24"], errors="coerce")
+    df["liquidity"] = pd.to_numeric(df["liquidity"].apply(lambda x: x["usd"]), errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"].apply(lambda x: x["h24"]), errors="coerce")
     df["created_at"] = pd.to_datetime(datetime.utcnow())
     
     # Filter tokens with liquidity > 5000
