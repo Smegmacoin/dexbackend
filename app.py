@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # Enable CORS for the app
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,15 +55,26 @@ def fetch_data_from_dex():
 def filter_data(raw_data):
     """Apply filters to the raw Solana data."""
     df = pd.DataFrame(raw_data)
-    # Extract relevant fields
+    # Extract relevant fields with error handling
     df["price"] = pd.to_numeric(df["priceUsd"], errors="coerce")
-    df["liquidity"] = pd.to_numeric(df["liquidity"].apply(lambda x: x["usd"]), errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"].apply(lambda x: x["h24"]), errors="coerce")
+    df["liquidity"] = pd.to_numeric(df["liquidity"].apply(lambda x: x.get("usd", 0) if x else 0), errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"].apply(lambda x: x.get("h24", 0) if x else 0), errors="coerce")
     df["created_at"] = pd.to_datetime(datetime.utcnow())
     
     # Filter tokens with liquidity > 5000
     df = df[(df["liquidity"] > 5000)]
     return df[["pairAddress", "price", "liquidity", "volume", "created_at"]]
+
+# Save filtered data to the database
+def save_to_database(df):
+    """Save the filtered data to the database."""
+    with engine.connect() as conn:
+        for _, row in df.iterrows():
+            insert_query = text("""
+            INSERT INTO tokens (pair_address, price, liquidity, volume, created_at)
+            VALUES (:pairAddress, :price, :liquidity, :volume, :created_at)
+            """)
+            conn.execute(insert_query, **row)
 
 # API route: Fetch tokens
 @app.route('/tokens', methods=['GET'])
@@ -71,11 +82,19 @@ def get_tokens():
     """Fetch and return filtered Solana tokens."""
     try:
         raw_data = fetch_data_from_dex()
+        logging.info(f"Raw API Data: {raw_data}")  # Debugging
         filtered_data = filter_data(raw_data)
+        save_to_database(filtered_data)  # Save to database
         return jsonify(filtered_data.to_dict(orient="records"))
+    except requests.exceptions.RequestException as api_error:
+        logging.error(f"API Error: {api_error}")
+        return jsonify({"error": "Failed to fetch data from DEX Screener API."}), 500
+    except ValueError as val_error:
+        logging.error(f"Data Processing Error: {val_error}")
+        return jsonify({"error": "No valid data available for Solana tokens."}), 500
     except Exception as e:
-        logging.error(f"Error fetching tokens: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Unexpected Error: {e}")
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 # API route: Health check
 @app.route('/')
